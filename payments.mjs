@@ -58,7 +58,7 @@ export class PaymentService {
     this.network = network
     this.fundsWaitMs = fundsWaitMs
     this.operations = new OperationQueue(concurrency)
-    // Disposable pagination cursors only; losing these just restarts a lookup.
+    // Disposable lookup state only; losing this just restarts a lookup.
     this.historyScans = new Map()
   }
 
@@ -67,6 +67,7 @@ export class PaymentService {
   }
 
   response(checkingId, result, paymentHash = null) {
+    console.log("#### response", checkingId, result, paymentHash)
     return {
       checking_id: checkingId,
       payment_hash: paymentHash || lightningSendPaymentHash(result),
@@ -81,6 +82,7 @@ export class PaymentService {
       try {
         const wallet = await this.getWallet()
         const isHash = /^[0-9a-f]{64}$/i.test(checkingId)
+        console.log("#### lightning", checkingId, isHash)
         const result = isHash
           ? await this.findPayment(wallet, checkingId.toLowerCase())
           : await wallet.getLightningSendRequest(checkingId)
@@ -184,7 +186,7 @@ export class PaymentService {
     if (this.historyScans.size > 1024)
       this.historyScans.delete(this.historyScans.keys().next().value)
     try {
-      const result = await findLightningPayment(wallet, paymentHash, scan, 2)
+      const result = await findLightningPayment(wallet, paymentHash, scan)
       if (scan.complete) scan.retryAt = Date.now() + 1000
       // Do not cache a completed scan's result as authoritative payment state.
       if (result) this.historyScans.delete(paymentHash)
