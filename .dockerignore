@@ -9,3 +9,11 @@ pyproject.toml
 Makefile
 .prettierignore
 .prettierrc
+.env
+.env.*
+.local
+scripts
+docs
+compose.yaml
+*.test.mjs
+test

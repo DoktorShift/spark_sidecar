@@ -1,5 +1,9 @@
 spark-sidecar-state.json
 node_modules/
+.env
+.env.*
+!.env.example
+.local/
 result
 
 onchain/

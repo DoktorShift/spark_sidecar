@@ -128,13 +128,9 @@ export class PaymentService {
       // unresolved match, do not interpret it as permission to start a new one.
       if (this.historyScans.get(checkingId)?.hasMatch)
         return this.response(checkingId, null, checkingId)
-    } catch (error) {
-      console.log(
-        'Error while checking existing payment for',
-        checkingId,
-        error
-      )
-      // This read is advisory. Submission still uses Spark's idempotency key.
+    } catch {
+      // SDK errors may contain secrets; do not log the raw exception.
+      // This read is advisory. Submission still uses Spark's stable transfer ID.
     }
     try {
       signal?.throwIfAborted()
