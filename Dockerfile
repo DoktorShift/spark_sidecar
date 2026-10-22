@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:20-bookworm-slim
 
 ENV NODE_ENV=production \
     SPARK_SIDECAR_HOST=0.0.0.0 \

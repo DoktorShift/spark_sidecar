@@ -13,37 +13,6 @@
 This sidecar exposes a small HTTP API for LNbits to talk to the Spark L2 SDK.
 https://www.spark.money/
 
-## Local LNbits test stack
-
-This fork includes an isolated Docker Compose stack with LNbits 1.6.2 and the
-sidecar built from this checkout. It uses a new dedicated **mainnet** wallet.
-
-```bash
-npm ci
-npm test
-npm run stack:init
-docker compose up -d --build
-npm run stack:check
-```
-
-Open <http://127.0.0.1:5100>. The generated username and password are in `.env`.
-The check completes LNbits' first-install setup, creates a wallet named
-`Spark integration test`, and creates one real 1,000-sat invoice. Subsequent runs
-reuse that invoice and verify its status. The sidecar is available at
-`127.0.0.1:8765` with API-key authentication; LNbits connects to `http://sidecar:8765`
-inside the Compose network.
-
-`stack:init` creates a private, git-ignored `.env` and never overwrites it.
-Back up this file privately before funding: it contains the Spark recovery seed.
-LNbits' database is stored in the `spark-lnbits-test_lnbits-data` Docker volume.
-Both are needed to preserve wallet access and LNbits accounting. This stack uses
-its own project, ports and database; it does not change other LNbits deployments.
-
-The check verifies live balance, invoice creation, status lookup and SSE
-connectivity. Payment settlement and outgoing payments still need test funds.
-See [the local testing guide](docs/local-testing.md) for the payment checklist,
-restart checks and upstream PR assessment.
-
 ## Install
 
 ```

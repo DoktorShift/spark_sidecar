@@ -2,11 +2,6 @@
   "name": "lnbits-spark-sidecar",
   "private": true,
   "type": "module",
-  "scripts": {
-    "test": "node --test payments.test.mjs incoming.test.mjs server.test.mjs",
-    "stack:init": "node scripts/init-stack.mjs",
-    "stack:check": "node --env-file=.env scripts/check-stack.mjs"
-  },
   "dependencies": {
     "@buildonspark/spark-sdk": "0.13.0",
     "light-bolt11-decoder": "3.2.0"
