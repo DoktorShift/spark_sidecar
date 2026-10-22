@@ -67,7 +67,6 @@ export class PaymentService {
   }
 
   response(checkingId, result, paymentHash = null) {
-    console.log("#### response", checkingId, result, paymentHash)
     return {
       checking_id: checkingId,
       payment_hash: paymentHash || lightningSendPaymentHash(result),
@@ -82,7 +81,6 @@ export class PaymentService {
       try {
         const wallet = await this.getWallet()
         const isHash = /^[0-9a-f]{64}$/i.test(checkingId)
-        console.log("#### lightning", checkingId, isHash)
         const result = isHash
           ? await this.findPayment(wallet, checkingId.toLowerCase())
           : await wallet.getLightningSendRequest(checkingId)
@@ -125,7 +123,12 @@ export class PaymentService {
       // unresolved match, do not interpret it as permission to start a new one.
       if (this.historyScans.get(checkingId)?.hasMatch)
         return this.response(checkingId, null, checkingId)
-    } catch {
+    } catch (error) {
+      console.log(
+        'Error while checking existing payment for',
+        checkingId,
+        error
+      )
       // This read is advisory. Submission still uses Spark's idempotency key.
     }
     try {
