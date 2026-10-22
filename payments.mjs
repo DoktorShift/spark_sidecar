@@ -1,5 +1,6 @@
 import {OperationQueue} from './operation-queue.mjs'
 import {createHash, timingSafeEqual} from 'node:crypto'
+import {UUID} from '@buildonspark/spark-sdk'
 import {
   prepareLightningPayment,
   sendLightningPayment,
@@ -58,7 +59,7 @@ export class PaymentService {
     this.network = network
     this.fundsWaitMs = fundsWaitMs
     this.operations = new OperationQueue(concurrency)
-    // Disposable pagination cursors only; losing these just restarts a lookup.
+    // Disposable lookup state only; losing this just restarts a lookup.
     this.historyScans = new Map()
   }
 
@@ -100,18 +101,22 @@ export class PaymentService {
     if (data.amount_sats !== undefined) integer(data.amount_sats, 1)
     if (decodePayment(data.bolt11).hash !== checkingId)
       throw new Error('Invoice payment hash mismatch')
+    // A deterministic UUIDv8 keeps retries stable across process restarts.
+    const transferBytes = createHash('sha256')
+      .update(`spark-sidecar:lightning:${this.network}:${checkingId}`)
+      .digest()
+      .subarray(0, 16)
+    transferBytes[6] = (transferBytes[6] & 0x0f) | 0x80
+    transferBytes[8] = (transferBytes[8] & 0x3f) | 0x80
     let wallet
     const params = {
       invoice: data.bolt11,
       maxFeeSats: data.max_fee_sats,
       amountSatsToSend: data.amount_sats,
       preferSpark: false,
-      // SDK 0.9.0 forwards this to initiate_preimage_swap_v3. Spark stores
-      // the deduplicated response, scoped to the authenticated wallet identity.
-      // Never vary this key with invoice case, fee allowance, or process lifetime.
-      idempotencyKey: createHash('sha256')
-        .update(`spark-sidecar:lightning:${this.network}:${checkingId}`)
-        .digest('hex')
+      // SDK 0.13.0 uses this ID for the transfer, preimage swap and SSP request.
+      // Never vary it with invoice case, fee allowance, or process lifetime.
+      transferId: UUID.ofInner(transferBytes)
     }
     try {
       wallet = await this.getWallet()
@@ -123,7 +128,12 @@ export class PaymentService {
       // unresolved match, do not interpret it as permission to start a new one.
       if (this.historyScans.get(checkingId)?.hasMatch)
         return this.response(checkingId, null, checkingId)
-    } catch {
+    } catch (error) {
+      console.log(
+        'Error while checking existing payment for',
+        checkingId,
+        error
+      )
       // This read is advisory. Submission still uses Spark's idempotency key.
     }
     try {
@@ -184,7 +194,7 @@ export class PaymentService {
     if (this.historyScans.size > 1024)
       this.historyScans.delete(this.historyScans.keys().next().value)
     try {
-      const result = await findLightningPayment(wallet, paymentHash, scan, 2)
+      const result = await findLightningPayment(wallet, paymentHash, scan)
       if (scan.complete) scan.retryAt = Date.now() + 1000
       // Do not cache a completed scan's result as authoritative payment state.
       if (result) this.historyScans.delete(paymentHash)

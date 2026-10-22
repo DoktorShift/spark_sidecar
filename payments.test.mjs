@@ -5,12 +5,14 @@ import {bech32} from '@scure/base'
 import {
   SparkValidationError,
   SparkWallet,
-  Network
+  Network,
+  UUID
 } from '@buildonspark/spark-sdk'
 import {getLightningSendRequestQuery} from '@buildonspark/spark-sdk/types'
 import {PaymentService, createPaymentHandler} from './payments.mjs'
 import {
   decodePayment,
+  findLightningPayment,
   prepareLightningPayment,
   sendLightningPayment
 } from './lightning.mjs'
@@ -103,7 +105,7 @@ test('the pinned SDK passes the sidecar idempotency key to its preimage-swap ser
       feeEstimate: {originalUnit: 'SATOSHI', originalValue: 1}
     }),
     requestLightningSend: async ({userOutboundTransferExternalId}) => {
-      assert.equal(userOutboundTransferExternalId, 'provider-transfer')
+      assert.equal(userOutboundTransferExternalId, keys.at(-1))
       return request()
     }
   })
@@ -113,11 +115,19 @@ test('the pinned SDK passes the sidecar idempotency key to its preimage-swap ser
     selectLeavesAndExecute: async (_, callback) => callback([[]]),
     handleTransferEvent: async () => {}
   }
-  sdk.transferService = {prepareTransferForLightning: async () => ({})}
+  sdk.transferService = {
+    prepareTransferForLightning: async (_, __, ___, transferId) => ({
+      transferId
+    })
+  }
   sdk.lightningService = {
     swapNodesForPreimage: async params => {
+      assert.equal(
+        params.startTransferRequest.transferId,
+        params.idempotencyKey
+      )
       keys.push(params.idempotencyKey)
-      return {transfer: {id: 'provider-transfer'}}
+      return {transfer: {id: keys.at(-1), leaves: []}}
     }
   }
   const options = {
@@ -134,7 +144,10 @@ test('the pinned SDK passes the sidecar idempotency key to its preimage-swap ser
     )
   }
   assert.equal(keys.length, 2)
-  assert.match(keys[0], /^[0-9a-f]{64}$/)
+  assert.match(
+    keys[0],
+    /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  )
   assert.equal(keys[0], keys[1])
 })
 
@@ -175,9 +188,14 @@ test('Spark receives a stable idempotency key across restarts, casing and fee ch
     // Simulate provider history lag: deduplication must not depend on local data.
     payLightningInvoice: async params => {
       assert.equal(params.preferSpark, false)
-      assert.match(params.idempotencyKey, /^[0-9a-f]{64}$/)
-      if (!keys.has(params.idempotencyKey)) {
-        keys.add(params.idempotencyKey)
+      assert.ok(params.transferId instanceof UUID)
+      assert.equal(params.idempotencyKey, undefined)
+      assert.match(
+        params.transferId.toString(),
+        /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+      )
+      if (!keys.has(params.transferId.toString())) {
+        keys.add(params.transferId.toString())
         transfers++
       }
       return request()
@@ -224,7 +242,7 @@ test('lost send response recovers through Spark history after replacement', asyn
   assert.equal(calls, 1)
 })
 
-test('hash recovery matches outgoing invoices parsed by SDK 0.9.0', async t => {
+test('hash recovery matches outgoing invoices parsed by SDK 0.13.0', async t => {
   const providerRequest = getLightningSendRequestQuery(
     'spark-request'
   ).constructObject({
@@ -326,24 +344,78 @@ test('submissions do not restart failed or ambiguous legacy attempts', async t =
   }
 })
 
-test('long history scans are bounded per check and continue until the payment is found', async t => {
+test('one lookup scans every history page, including short and empty pages', async t => {
+  for (const matchPage of [0, 3, -1]) {
+    const afters = []
+    const cursors = [undefined, 'a', 'b', 'c']
+    const {service} = setup(t, {
+      getUserRequests: async ({first, after, types}) => {
+        assert.equal(first, 100)
+        assert.deepEqual(types, ['LIGHTNING_SEND'])
+        afters.push(after)
+        const index = cursors.indexOf(after)
+        assert.notEqual(index, -1)
+        return page(index === matchPage ? [request()] : [], cursors[index + 1])
+      }
+    })
+    assert.equal(
+      (await service.lightning(paymentHash)).status,
+      matchPage === -1 ? 'UNKNOWN' : 'LIGHTNING_PAYMENT_SUCCEEDED'
+    )
+    assert.deepEqual(afters, cursors)
+  }
+})
+
+test('submissions recover an existing payment beyond page two before dispatch', async t => {
   const afters = []
   const {service} = setup(t, {
     getUserRequests: async ({after}) => {
       afters.push(after)
       if (!after) return page([], 'a')
       if (after === 'a') return page([], 'b')
-      if (after === 'b') return page([], 'c')
       return page([request()])
-    }
+    },
+    getBalance: async () => assert.fail('must recover before checking funds'),
+    payLightningInvoice: async () => assert.fail('must not resubmit')
   })
-  assert.equal((await service.lightning(paymentHash)).status, 'UNKNOWN')
-  assert.equal(afters.length, 2)
-  assert.equal(
-    (await service.lightning(paymentHash)).status,
-    'LIGHTNING_PAYMENT_SUCCEEDED'
-  )
-  assert.deepEqual(afters, [undefined, 'a', 'b', 'c'])
+  const result = await service.lightning(paymentHash, data)
+  assert.equal(result.status, 'LIGHTNING_PAYMENT_SUCCEEDED')
+  assert.equal(result.checking_id, 'spark-request')
+  assert.deepEqual(afters, [undefined, 'a', 'b'])
+})
+
+test('a second matching attempt on a later page remains ambiguous', async t => {
+  const afters = []
+  const {service} = setup(t, {
+    getUserRequests: async ({after}) => {
+      afters.push(after)
+      if (!after) return page([request()], 'a')
+      if (after === 'a') return page([], 'b')
+      return page([request('CREATED', 'second')])
+    },
+    payLightningInvoice: async () => assert.fail('must not resubmit')
+  })
+  assert.equal((await service.lightning(paymentHash, data)).status, 'UNKNOWN')
+  assert.deepEqual(afters, [undefined, 'a', 'b'])
+})
+
+test('history pagination rejects missing, invalid and cyclic cursors', async () => {
+  for (const endCursor of [undefined, null, '', 123, {}, 'repeat']) {
+    let calls = 0
+    const wallet = {
+      getUserRequests: async () => {
+        assert(++calls <= 2, 'must stop before requesting a repeated page')
+        return {
+          entities: [request()],
+          pageInfo: {hasNextPage: true, endCursor}
+        }
+      }
+    }
+    await assert.rejects(findLightningPayment(wallet, paymentHash), {
+      message: 'Invalid Spark pagination'
+    })
+    assert.equal(calls, endCursor === 'repeat' ? 2 : 1)
+  }
 })
 
 test('malformed history never proves success', async t => {
@@ -568,13 +640,13 @@ test('concurrent invoices and duplicate POSTs stay separate with provider dedupl
       peak = Math.max(peak, activeHashes.size)
       await new Promise(resolve => setTimeout(resolve, 5))
       activeHashes.delete(hash)
-      if (!sent.has(params.idempotencyKey))
-        sent.set(params.idempotencyKey, {
+      if (!sent.has(params.transferId.toString()))
+        sent.set(params.transferId.toString(), {
           ...request(),
           id: `spark-${hash}`,
           encodedInvoice: params.invoice
         })
-      return sent.get(params.idempotencyKey)
+      return sent.get(params.transferId.toString())
     }
   })
   const handler = await createPaymentHandler({...options, apiKey: 'test'})
